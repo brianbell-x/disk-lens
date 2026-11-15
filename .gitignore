@@ -1,0 +1,5 @@
+/target/
+/DiskLens.exe
+.codex-notes/
+*.tmp
+*.log

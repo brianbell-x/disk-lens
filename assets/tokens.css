@@ -1,0 +1,67 @@
+@font-face {
+  font-family: 'Geist';
+  src: url('/fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('/fonts/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: block;
+}
+
+:root {
+  /* Approved flat dark surfaces */
+  --bg-canvas: #181818;
+  --bg-surface: #1F1F1F;
+  --bg-hover: #272727;
+  --bg-active: #313131;
+
+  --border-subtle: #272727;
+  --border-strong: #313131;
+
+  /* Text hierarchy (3 steps) + semantic status accents */
+  --text-primary: #F4F4F5;
+  --text-secondary: #A1A1AA;
+  --text-muted: #71717A;
+  --accent-amber: #E5B567;
+  --accent-danger: #F87171;
+
+  /* Typography (2 families, 3 sizes, 3 weights) */
+  --font-sans: 'Geist', sans-serif;
+  --font-mono: 'Geist Mono', monospace;
+
+  --size-xs: 0.75rem;    /* 12px */
+  --lh-xs: 1rem;         /* 16px */
+  --size-sm: 0.875rem;   /* 14px */
+  --lh-sm: 1.25rem;      /* 20px */
+  --size-base: 1rem;     /* 16px */
+  --lh-base: 1.5rem;     /* 24px */
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* Strict spacing tokens */
+  --sp-0: 0px;
+  --sp-25: 2px;
+  --sp-50: 4px;
+  --sp-75: 8px;
+  --sp-100: 12px;
+  --sp-200: 16px;
+  --sp-300: 24px;
+  --sp-400: 32px;
+
+  /* Nested corner radii: 16px outer - 12px inset = 4px inner */
+  --radius-card: 16px;
+  --radius-inner: 4px;
+
+  /* Motion */
+  --ease-base: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-hover: 240ms;
+  --dur-move: 500ms;
+}

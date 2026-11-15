@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Disk Lens</title>
+  <meta name="description" content="Minimalist high speed folder storage analyzer for Windows.">
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/tokens.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#tree-root">Skip to folder list</a>
+  <main class="app-shell">
+    <header class="drive-bar">
+      <div class="drive-left">
+        <h1 id="drive-title" class="drive-title">C:\</h1>
+        <div id="drive-switcher" class="drive-switcher" role="radiogroup" aria-label="Select drive" hidden></div>
+        <span id="drive-meta" class="drive-meta"></span>
+      </div>
+      <div class="drive-right">
+        <span id="scan-status" class="scan-status" aria-live="polite" hidden></span>
+        <button type="button" id="leftovers-btn" class="filter-btn" aria-pressed="false" title="Show folders likely left behind by uninstalled apps" hidden>Leftovers</button>
+        <button type="button" id="rescan-btn" class="icon-btn" aria-label="Rescan drive" title="Rescan drive">
+          <!-- Phosphor ArrowsClockwise 16x16 -->
+          <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true">
+            <path d="M240,56v48a8,8,0,0,1-8,8H184a8,8,0,0,1,0-16H211.4L184.81,71.64l-.25-.24a80,80,0,1,0-1.67,114.78,8,8,0,0,1,11,11.63A95.44,95.44,0,0,1,128,224h-1.32A96,96,0,1,1,195.75,60L224,85.8V56a8,8,0,1,1,16,0Z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="notice-banner" class="notice-banner" role="status" hidden></div>
+
+    <section class="tree-card" aria-label="Folders sorted by size">
+      <div id="tree-root" class="tree-list" role="tree" aria-label="Folder storage hierarchy">
+        <div class="skeleton-list" aria-hidden="true">
+          <div class="skeleton-row"><div class="skeleton-bar" style="width: 42%"></div><div class="skeleton-bar" style="width: 72%; justify-self: end"></div><div class="skeleton-bar" style="width: 100%"></div></div>
+          <div class="skeleton-row"><div class="skeleton-bar" style="width: 28%"></div><div class="skeleton-bar" style="width: 66%; justify-self: end"></div><div class="skeleton-bar" style="width: 100%"></div></div>
+          <div class="skeleton-row"><div class="skeleton-bar" style="width: 54%"></div><div class="skeleton-bar" style="width: 60%; justify-self: end"></div><div class="skeleton-bar" style="width: 100%"></div></div>
+          <div class="skeleton-row"><div class="skeleton-bar" style="width: 35%"></div><div class="skeleton-bar" style="width: 58%; justify-self: end"></div><div class="skeleton-bar" style="width: 100%"></div></div>
+          <div class="skeleton-row"><div class="skeleton-bar" style="width: 48%"></div><div class="skeleton-bar" style="width: 50%; justify-self: end"></div><div class="skeleton-bar" style="width: 100%"></div></div>
+          <div class="skeleton-row"><div class="skeleton-bar" style="width: 31%"></div><div class="skeleton-bar" style="width: 46%; justify-self: end"></div><div class="skeleton-bar" style="width: 100%"></div></div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
