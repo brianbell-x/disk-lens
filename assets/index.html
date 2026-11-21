@@ -20,7 +20,7 @@
       </div>
       <div class="drive-right">
         <span id="scan-status" class="scan-status" aria-live="polite" hidden></span>
-        <button type="button" id="leftovers-btn" class="filter-btn" aria-pressed="false" title="Show folders likely left behind by uninstalled apps" hidden>Leftovers</button>
+        <button type="button" id="leftovers-btn" class="filter-btn" aria-pressed="false" title="Review folders left behind by uninstalled apps" hidden>Leftovers</button>
         <button type="button" id="rescan-btn" class="icon-btn" aria-label="Rescan drive" title="Rescan drive">
           <!-- Phosphor ArrowsClockwise 16x16 -->
           <svg viewBox="0 0 256 256" fill="currentColor" aria-hidden="true">
@@ -43,6 +43,7 @@
           <div class="skeleton-row"><div class="skeleton-bar" style="width: 31%"></div><div class="skeleton-bar" style="width: 46%; justify-self: end"></div><div class="skeleton-bar" style="width: 100%"></div></div>
         </div>
       </div>
+      <div id="leftovers-root" class="leftovers-view" hidden></div>
     </section>
   </main>
   <script src="/app.js" defer></script>

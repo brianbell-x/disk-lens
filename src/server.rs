@@ -1,6 +1,6 @@
 use crate::actions;
 use crate::cache;
-use crate::orphans::{self, OrphanReport};
+use crate::orphans::{self, Confidence, OrphanReport};
 use crate::scanner::{self, DriveInfo, ScanTree};
 use crate::watcher;
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const INDEX_HTML: &[u8] = include_bytes!("../assets/index.html");
 const TOKENS_CSS: &[u8] = include_bytes!("../assets/tokens.css");
@@ -43,6 +43,7 @@ pub struct AppState {
     pub active_drive: RwLock<String>,
     pub tree: RwLock<Option<Arc<ScanTree>>>,
     pub orphans: RwLock<Option<Arc<OrphanReport>>>,
+    pub last_orphan_refresh: Mutex<Option<Instant>>,
     pub dirty: AtomicBool,
     pub scanning: AtomicBool,
     pub cancel_scan: Mutex<Option<Arc<AtomicBool>>>,
@@ -59,6 +60,7 @@ impl AppState {
             active_drive: RwLock::new(initial_drive),
             tree: RwLock::new(None),
             orphans: RwLock::new(None),
+            last_orphan_refresh: Mutex::new(None),
             dirty: AtomicBool::new(false),
             scanning: AtomicBool::new(false),
             cancel_scan: Mutex::new(None),
@@ -74,6 +76,20 @@ impl AppState {
         let tree_opt = self.tree.read().unwrap().clone();
         let report = tree_opt.map(|t| Arc::new(orphans::detect_orphans(&t)));
         *self.orphans.write().unwrap() = report;
+        *self.last_orphan_refresh.lock().unwrap() = Some(Instant::now());
+    }
+
+    pub fn recompute_orphans_if_stale(&self, min_interval: Duration) {
+        let should = {
+            let guard = self.last_orphan_refresh.lock().unwrap();
+            match *guard {
+                None => true,
+                Some(t) => t.elapsed() >= min_interval,
+            }
+        };
+        if should {
+            self.recompute_orphans();
+        }
     }
 
     pub fn flush_if_dirty(&self) {
@@ -135,7 +151,7 @@ impl AppState {
 
             if changed {
                 st.dirty.store(true, Ordering::Release);
-                st.recompute_orphans();
+                st.recompute_orphans_if_stale(Duration::from_secs(30));
                 st.broadcast("updated", r#"{"reason":"watcher"}"#);
             }
         });
@@ -235,6 +251,8 @@ struct StateResponse {
     elapsed_ms: u128,
     orphan_count: usize,
     orphan_total_bytes: u64,
+    orphan_tiny_count: usize,
+    orphan_ignored_count: usize,
 }
 
 #[derive(Serialize, Clone)]
@@ -250,7 +268,54 @@ struct UiRow {
     access_denied: bool,
     can_delete: bool,
     leftover_reason: Option<String>,
+    leftover_confidence: Option<&'static str>,
     location_hint: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OrphanItemDto {
+    key: String,
+    name: String,
+    path: String,
+    location_group: &'static str,
+    size: u64,
+    is_tiny: bool,
+    days_idle: Option<u64>,
+    confidence: Confidence,
+    evidence: Vec<String>,
+    reason: String,
+    expandable: bool,
+    can_delete: bool,
+}
+
+#[derive(Serialize)]
+struct OrphanGroupDto {
+    app_key: String,
+    app_label: String,
+    confidence: Confidence,
+    total_size: u64,
+    summary_reason: String,
+    evidence: Vec<String>,
+    items: Vec<OrphanItemDto>,
+}
+
+#[derive(Serialize)]
+struct OrphanCountsDto {
+    all: usize,
+    confirmed: usize,
+    likely: usize,
+    review: usize,
+}
+
+#[derive(Serialize)]
+struct OrphansResponse {
+    total_bytes: u64,
+    group_count: usize,
+    folder_count: usize,
+    counts: OrphanCountsDto,
+    tiny_count: usize,
+    ignored_count: usize,
+    groups: Vec<OrphanGroupDto>,
 }
 
 #[derive(Serialize)]
@@ -283,6 +348,11 @@ struct DeleteReq {
     path: String,
     #[serde(default)]
     dry_run: bool,
+}
+
+#[derive(Deserialize)]
+struct PathsBatchReq {
+    paths: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -408,6 +478,7 @@ fn build_file_rows(node: &scanner::DirNode, dir_path: &str) -> Vec<UiRow> {
             access_denied: false,
             can_delete,
             leftover_reason: None,
+            leftover_confidence: None,
             location_hint: None,
         });
     }
@@ -433,6 +504,7 @@ fn build_file_rows(node: &scanner::DirNode, dir_path: &str) -> Vec<UiRow> {
             access_denied: false,
             can_delete: false,
             leftover_reason: None,
+            leftover_confidence: None,
             location_hint: None,
         });
     }
@@ -440,13 +512,119 @@ fn build_file_rows(node: &scanner::DirNode, dir_path: &str) -> Vec<UiRow> {
     rows
 }
 
+fn confidence_str(c: Confidence) -> &'static str {
+    match c {
+        Confidence::Confirmed => "confirmed",
+        Confidence::Likely => "likely",
+        Confidence::Review => "review",
+    }
+}
+
+fn build_orphan_rows(tree: &ScanTree, orphans_opt: &Option<Arc<OrphanReport>>) -> Vec<UiRow> {
+    let Some(rep) = orphans_opt else {
+        return Vec::new();
+    };
+    let mut rows = Vec::with_capacity(rep.sorted_list.len());
+    for m in &rep.sorted_list {
+        let Some(c) = tree.nodes.get(m.node_id as usize) else {
+            continue;
+        };
+        if c.total_size == 0 {
+            continue;
+        }
+        let expandable = !c.children.is_empty() || !c.top_files.is_empty();
+        let can_delete = !c.access_denied && actions::is_deletable_path(&m.path);
+        rows.push(UiRow {
+            key: format!("dir:{}", m.path),
+            name: m.name.clone(),
+            path: m.path.clone(),
+            vscode_path: m.path.clone(),
+            size: c.total_size,
+            kind: "folder",
+            expandable,
+            select_in_explorer: false,
+            access_denied: c.access_denied,
+            can_delete,
+            leftover_reason: Some(m.reason.clone()),
+            leftover_confidence: Some(confidence_str(m.confidence)),
+            location_hint: Some(m.location_group.to_string()),
+        });
+    }
+    rows
+}
+
+fn refresh_deleted_paths(state: &AppState, deleted_paths: &[String]) {
+    if deleted_paths.is_empty() {
+        return;
+    }
+    {
+        let mut w = state.tree.write().unwrap();
+        if let Some(arc_ref) = w.as_mut() {
+            let root_trim = arc_ref.root_path.trim_end_matches('\\');
+            let rels: Vec<String> = deleted_paths
+                .iter()
+                .map(|p| strip_drive_root(p, root_trim))
+                .collect();
+            Arc::make_mut(arc_ref).refresh_changed_paths(&rels);
+        }
+    }
+    state.dirty.store(true, Ordering::Release);
+    state.recompute_orphans();
+    state.broadcast("updated", r#"{"reason":"deleted"}"#);
+}
+
+fn strip_drive_root(path: &str, root_trim: &str) -> String {
+    let norm = path.replace('/', "\\");
+    if norm.len() >= root_trim.len() && norm[..root_trim.len()].eq_ignore_ascii_case(root_trim) {
+        norm[root_trim.len()..].trim_start_matches('\\').to_string()
+    } else {
+        norm
+    }
+}
+
+fn serve_sse_stream(stream: &mut TcpStream, state: &AppState) -> std::io::Result<()> {
+    let _ = stream.set_read_timeout(None);
+    let _ = stream.set_nodelay(true);
+    stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n: connected\n\n",
+    )?;
+    stream.flush()?;
+
+    let (tx, rx) = mpsc::channel::<String>();
+    state.subscribers.lock().unwrap().push(tx);
+
+    loop {
+        let bytes: &[u8] = match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(ref msg) => {
+                if stream.write_all(msg.as_bytes()).is_err() || stream.flush().is_err() {
+                    break;
+                }
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => b": keepalive\n\n",
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        if stream.write_all(bytes).is_err() || stream.flush().is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 fn paginate_rows(all_rows: Vec<UiRow>, offset: usize, limit: usize) -> ChildrenResponse {
     let start = offset.min(all_rows.len());
     let end = start.saturating_add(limit).min(all_rows.len());
     let has_more = end < all_rows.len();
     let remaining_count = all_rows.len().saturating_sub(end);
-    let remaining_size: u64 = all_rows[end..].iter().map(|r| r.size).sum();
-    let rows = all_rows.into_iter().skip(start).take(end - start).collect();
+    let mut remaining_size = 0u64;
+    for r in &all_rows[end..] {
+        remaining_size = remaining_size.saturating_add(r.size);
+    }
+    let rows: Vec<UiRow> = all_rows
+        .into_iter()
+        .skip(start)
+        .take(end - start)
+        .collect();
 
     ChildrenResponse {
         rows,
@@ -478,7 +656,8 @@ fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> std::io::Re
         }
         if let Some((h, v)) = line.split_once(':') {
             if h.trim().eq_ignore_ascii_case("content-length") {
-                content_len = v.trim().parse::<usize>().unwrap_or(0).min(1_048_576);
+                let parsed = v.trim().parse::<usize>().unwrap_or(0);
+                content_len = parsed.min(1_048_576);
             }
         }
     }
@@ -561,10 +740,190 @@ fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> std::io::Re
                     .as_ref()
                     .map_or(0, |t| t.stats.total_alloc_bytes),
                 elapsed_ms: tree_opt.as_ref().map_or(0, |t| t.stats.elapsed_ms),
-                orphan_count: orphans_opt.as_ref().map_or(0, |o| o.sorted_list.len()),
-                orphan_total_bytes: orphans_opt.as_ref().map_or(0, |o| o.total_bytes),
+                orphan_count: orphans_opt.as_ref().map_or(0, |o| o.non_tiny_count),
+                orphan_total_bytes: orphans_opt.as_ref().map_or(0, |o| o.non_tiny_bytes),
+                orphan_tiny_count: orphans_opt.as_ref().map_or(0, |o| o.tiny_count),
+                orphan_ignored_count: orphans_opt.as_ref().map_or(0, |o| o.ignored_count),
             };
             write_json(&mut stream, "200 OK", &resp)
+        }
+        ("GET", "/api/orphans") => {
+            let params = parse_query(query_str);
+            let include_tiny = params
+                .get("include_tiny")
+                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+            let conf_filter = params.get("confidence").map(String::as_str).unwrap_or("all");
+
+            let tree_opt = state.tree.read().unwrap().clone();
+            let orphans_opt = state.orphans.read().unwrap().clone();
+            let (Some(tree), Some(rep)) = (tree_opt, orphans_opt) else {
+                let empty = OrphansResponse {
+                    total_bytes: 0,
+                    group_count: 0,
+                    folder_count: 0,
+                    counts: OrphanCountsDto {
+                        all: 0,
+                        confirmed: 0,
+                        likely: 0,
+                        review: 0,
+                    },
+                    tiny_count: 0,
+                    ignored_count: 0,
+                    groups: Vec::new(),
+                };
+                return write_json(&mut stream, "200 OK", &empty);
+            };
+
+            let mut count_all = 0usize;
+            let mut count_confirmed = 0usize;
+            let mut count_likely = 0usize;
+            let mut count_review = 0usize;
+            let mut out_groups = Vec::new();
+            let mut total_bytes = 0u64;
+            let mut folder_count = 0usize;
+
+            for g in &rep.groups {
+                if !include_tiny && !g.has_non_tiny {
+                    continue;
+                }
+                count_all += 1;
+                match g.confidence {
+                    Confidence::Confirmed => count_confirmed += 1,
+                    Confidence::Likely => count_likely += 1,
+                    Confidence::Review => count_review += 1,
+                }
+
+                let conf_matches = match conf_filter {
+                    "confirmed" => g.confidence == Confidence::Confirmed,
+                    "likely" => g.confidence == Confidence::Likely,
+                    "review" => g.confidence == Confidence::Review,
+                    _ => true,
+                };
+                if !conf_matches {
+                    continue;
+                }
+
+                let mut items = Vec::new();
+                for m in &g.items {
+                    if !include_tiny && m.is_tiny && !g.has_non_tiny {
+                        continue;
+                    }
+                    let Some(c) = tree.nodes.get(m.node_id as usize) else {
+                        continue;
+                    };
+                    let expandable = !c.children.is_empty() || !c.top_files.is_empty();
+                    let can_delete = !c.access_denied && actions::is_deletable_path(&m.path);
+                    items.push(OrphanItemDto {
+                        key: format!("dir:{}", m.path),
+                        name: m.name.clone(),
+                        path: m.path.clone(),
+                        location_group: m.location_group,
+                        size: c.total_size,
+                        is_tiny: m.is_tiny,
+                        days_idle: m.days_idle,
+                        confidence: m.confidence,
+                        evidence: m.evidence.clone(),
+                        reason: m.reason.clone(),
+                        expandable,
+                        can_delete,
+                    });
+                }
+                if items.is_empty() {
+                    continue;
+                }
+                let group_size: u64 = items.iter().map(|i| i.size).sum();
+                total_bytes = total_bytes.saturating_add(group_size);
+                folder_count += items.len();
+                out_groups.push(OrphanGroupDto {
+                    app_key: g.app_key.clone(),
+                    app_label: g.app_label.clone(),
+                    confidence: g.confidence,
+                    total_size: group_size,
+                    summary_reason: g.summary_reason.clone(),
+                    evidence: g.evidence.clone(),
+                    items,
+                });
+            }
+
+            let resp = OrphansResponse {
+                total_bytes,
+                group_count: out_groups.len(),
+                folder_count,
+                counts: OrphanCountsDto {
+                    all: count_all,
+                    confirmed: count_confirmed,
+                    likely: count_likely,
+                    review: count_review,
+                },
+                tiny_count: rep.tiny_count,
+                ignored_count: rep.ignored_count,
+                groups: out_groups,
+            };
+            write_json(&mut stream, "200 OK", &resp)
+        }
+        ("POST", "/api/orphans/ignore") => {
+            let Ok(req) = serde_json::from_slice::<PathsBatchReq>(&body) else {
+                return write_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": "Invalid request payload."}),
+                );
+            };
+            match orphans::add_ignored_paths(&req.paths) {
+                Ok(total_ignored) => {
+                    state.recompute_orphans();
+                    state.broadcast("updated", r#"{"reason":"ignored"}"#);
+                    write_json(
+                        &mut stream,
+                        "200 OK",
+                        &serde_json::json!({"ok": true, "ignored_count": total_ignored}),
+                    )
+                }
+                Err(msg) => write_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": msg}),
+                ),
+            }
+        }
+        ("POST", "/api/orphans/clear-ignored") => match orphans::clear_ignored_paths() {
+            Ok(()) => {
+                state.recompute_orphans();
+                state.broadcast("updated", r#"{"reason":"ignored"}"#);
+                write_json(&mut stream, "200 OK", &serde_json::json!({"ok": true}))
+            }
+            Err(msg) => write_json(
+                &mut stream,
+                "400 Bad Request",
+                &serde_json::json!({"error": msg}),
+            ),
+        },
+        ("POST", "/api/delete-batch") => {
+            let Ok(req) = serde_json::from_slice::<PathsBatchReq>(&body) else {
+                return write_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &serde_json::json!({"error": "Invalid request payload."}),
+                );
+            };
+            let mut deleted_paths: Vec<String> = Vec::new();
+            let mut failed: Vec<serde_json::Value> = Vec::new();
+            for p in &req.paths {
+                match actions::move_to_recycle_bin(p) {
+                    Ok(()) => deleted_paths.push(p.clone()),
+                    Err(err) => failed.push(serde_json::json!({"path": p, "error": err})),
+                }
+            }
+            refresh_deleted_paths(&state, &deleted_paths);
+            write_json(
+                &mut stream,
+                "200 OK",
+                &serde_json::json!({
+                    "ok": failed.is_empty(),
+                    "deleted": deleted_paths.len(),
+                    "failed": failed
+                }),
+            )
         }
         ("GET", "/api/children") => {
             let params = parse_query(query_str);
@@ -592,34 +951,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> std::io::Re
             let key = params.get("key").unwrap_or(&default_key);
 
             if key == "orphans" {
-                let mut rows = Vec::new();
-                if let Some(ref rep) = orphans_opt {
-                    rows.reserve(rep.sorted_list.len());
-                    for m in &rep.sorted_list {
-                        let Some(c) = tree.nodes.get(m.node_id as usize) else {
-                            continue;
-                        };
-                        if c.total_size == 0 {
-                            continue;
-                        }
-                        let expandable = !c.children.is_empty() || !c.top_files.is_empty();
-                        let can_delete = !c.access_denied && actions::is_deletable_path(&m.path);
-                        rows.push(UiRow {
-                            key: format!("dir:{}", m.path),
-                            name: m.name.clone(),
-                            path: m.path.clone(),
-                            vscode_path: m.path.clone(),
-                            size: c.total_size,
-                            kind: "folder",
-                            expandable,
-                            select_in_explorer: false,
-                            access_denied: c.access_denied,
-                            can_delete,
-                            leftover_reason: Some(m.reason.clone()),
-                            location_hint: Some(m.location_group.to_string()),
-                        });
-                    }
-                }
+                let rows = build_orphan_rows(&tree, &orphans_opt);
                 return write_json(&mut stream, "200 OK", &paginate_rows(rows, offset, limit));
             }
 
@@ -662,11 +994,19 @@ fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> std::io::Re
                 let c = &tree.nodes[cid as usize];
                 let full = format!("{parent_base}\\{}", c.name);
                 let expandable = !c.children.is_empty() || !c.top_files.is_empty();
-                let leftover_reason = orphans_opt.as_ref().and_then(|rep| {
-                    rep.by_path_lower
-                        .get(&full.to_ascii_lowercase())
-                        .map(|m| m.reason.clone())
-                });
+                let (leftover_reason, leftover_confidence) = orphans_opt
+                    .as_ref()
+                    .and_then(|rep| rep.by_path_lower.get(&full.to_ascii_lowercase()))
+                    .filter(|m| !m.is_tiny && m.confidence != Confidence::Review)
+                    .map(|m| {
+                        let conf_str = match m.confidence {
+                            Confidence::Confirmed => "confirmed",
+                            Confidence::Likely => "likely",
+                            Confidence::Review => "review",
+                        };
+                        (Some(m.reason.clone()), Some(conf_str))
+                    })
+                    .unwrap_or((None, None));
                 let can_delete = !c.access_denied && actions::is_deletable_path(&full);
                 rows.push(UiRow {
                     key: format!("dir:{full}"),
@@ -680,6 +1020,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> std::io::Re
                     access_denied: c.access_denied,
                     can_delete,
                     leftover_reason,
+                    leftover_confidence,
                     location_hint: None,
                 });
             }
@@ -702,6 +1043,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> std::io::Re
                     access_denied: false,
                     can_delete: false,
                     leftover_reason: None,
+                    leftover_confidence: None,
                     location_hint: None,
                 });
                 rows.sort_unstable_by(|a, b| b.size.cmp(&a.size));
@@ -778,24 +1120,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> std::io::Re
             }
             match actions::move_to_recycle_bin(&req.path) {
                 Ok(()) => {
-                    {
-                        let mut w = state.tree.write().unwrap();
-                        if let Some(arc_ref) = w.as_mut() {
-                            let root_trim = arc_ref.root_path.trim_end_matches('\\');
-                            let norm = req.path.replace('/', "\\");
-                            let rel = if norm.len() >= root_trim.len()
-                                && norm[..root_trim.len()].eq_ignore_ascii_case(root_trim)
-                            {
-                                norm[root_trim.len()..].trim_start_matches('\\').to_string()
-                            } else {
-                                norm
-                            };
-                            Arc::make_mut(arc_ref).refresh_changed_paths(&[rel]);
-                        }
-                    }
-                    state.dirty.store(true, Ordering::Release);
-                    state.recompute_orphans();
-                    state.broadcast("updated", r#"{"reason":"deleted"}"#);
+                    refresh_deleted_paths(&state, &[req.path]);
                     write_json(&mut stream, "200 OK", &serde_json::json!({"ok": true}))
                 }
                 Err(msg) => write_json(
@@ -843,35 +1168,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> std::io::Re
             state.start_scan(target_drive);
             write_json(&mut stream, "200 OK", &serde_json::json!({"ok": true}))
         }
-        ("GET", "/api/events") => {
-            let _ = stream.set_read_timeout(None);
-            let _ = stream.set_nodelay(true);
-            stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n: connected\n\n",
-            )?;
-            stream.flush()?;
-
-            let (tx, rx) = mpsc::channel::<String>();
-            state.subscribers.lock().unwrap().push(tx);
-
-            loop {
-                match rx.recv_timeout(Duration::from_secs(15)) {
-                    Ok(msg) => {
-                        if stream.write_all(msg.as_bytes()).is_err() || stream.flush().is_err() {
-                            break;
-                        }
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        if stream.write_all(b": keepalive\n\n").is_err() || stream.flush().is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            Ok(())
-        }
+        ("GET", "/api/events") => serve_sse_stream(&mut stream, &state),
         _ => write_response(
             &mut stream,
             "404 Not Found",

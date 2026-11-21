@@ -13,8 +13,8 @@ Minimalist Windows utility where folders and files are ranked by disk space acro
 ## Usage
 
 - **Nested folders** — Any folder row can be clicked to expand nested subfolders and files to any depth.
-- **App leftovers** — Data left behind by uninstalled apps is tagged with `Leftover?` and grouped under **Leftovers**.
-- **Row actions** — Any item can be opened in File Explorer, opened in VS Code, or moved to the Recycle Bin from the icons on the right.
+- **App leftovers** — Uninstalled app remnants are grouped by app under **Leftovers** with confidence tiers (`Confirmed`, `Likely`, `Review`), visible evidence, ignore/keep persistence, and batch Recycle Bin cleanup.
+- **Row actions** — Any item can be opened in File Explorer, opened in VS Code, kept/ignored, or moved to the Recycle Bin from the icons on the right.
 
 ## Build
 

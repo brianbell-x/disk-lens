@@ -65,19 +65,31 @@ fn run_warm_cache() {
     let rep = orphans::detect_orphans(&loaded);
     let orph_ms = t_orph.elapsed().as_millis();
     println!(
-        "Detected {} suspected leftover folders ({:.2} GB) in {orph_ms} ms:",
-        rep.sorted_list.len(),
-        rep.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        "Detected {} suspected leftover folders ({} apps, {:.2} GB, +{} tiny/empty) in {orph_ms} ms:",
+        rep.non_tiny_count,
+        rep.groups.iter().filter(|g| g.has_non_tiny).count(),
+        rep.non_tiny_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        rep.tiny_count
     );
-    for (i, item) in rep.sorted_list.iter().enumerate() {
+    for (i, g) in rep.groups.iter().filter(|g| g.has_non_tiny).enumerate() {
         println!(
-            "  {:>2}. {:>9.2} MB  [{}]  {}  ->  {}",
+            "  {:>2}. [{:<9}] {:>9.2} MB  {} ({} folder{})  ->  {}",
             i + 1,
-            item.size as f64 / (1024.0 * 1024.0),
-            item.location_group,
-            item.path,
-            item.reason
+            format!("{:?}", g.confidence).to_lowercase(),
+            g.non_tiny_size as f64 / (1024.0 * 1024.0),
+            g.app_label,
+            g.items.len(),
+            if g.items.len() == 1 { "" } else { "s" },
+            g.summary_reason
         );
+        for item in &g.items {
+            println!(
+                "       - {:>9.2} MB  [{}]  {}",
+                item.size as f64 / (1024.0 * 1024.0),
+                item.location_group,
+                item.path
+            );
+        }
     }
 }
 
@@ -104,19 +116,31 @@ fn run_check_orphans() {
     let rep = orphans::detect_orphans(&loaded);
     let orph_ms = t_orph.elapsed().as_millis();
     println!(
-        "Detected {} suspected leftover folders ({:.2} GB) in {orph_ms} ms:",
-        rep.sorted_list.len(),
-        rep.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        "Detected {} suspected leftover folders ({} apps, {:.2} GB, +{} tiny/empty) in {orph_ms} ms:",
+        rep.non_tiny_count,
+        rep.groups.iter().filter(|g| g.has_non_tiny).count(),
+        rep.non_tiny_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        rep.tiny_count
     );
-    for (i, item) in rep.sorted_list.iter().enumerate() {
+    for (i, g) in rep.groups.iter().filter(|g| g.has_non_tiny).enumerate() {
         println!(
-            "  {:>2}. {:>9.2} MB  [{}]  {}  ->  {}",
+            "  {:>2}. [{:<9}] {:>9.2} MB  {} ({} folder{})  ->  {}",
             i + 1,
-            item.size as f64 / (1024.0 * 1024.0),
-            item.location_group,
-            item.path,
-            item.reason
+            format!("{:?}", g.confidence).to_lowercase(),
+            g.non_tiny_size as f64 / (1024.0 * 1024.0),
+            g.app_label,
+            g.items.len(),
+            if g.items.len() == 1 { "" } else { "s" },
+            g.summary_reason
         );
+        for item in &g.items {
+            println!(
+                "       - {:>9.2} MB  [{}]  {}",
+                item.size as f64 / (1024.0 * 1024.0),
+                item.location_group,
+                item.path
+            );
+        }
     }
 }
 
